@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">码字工坊</string>
+    <string name="title_activity_main">码字工坊</string>
+    <string name="widget_desc">码字工坊章节与 Part 挂件：点一下就回到正在写的那篇文</string>
+    <string name="package_name">com.maoxie.writer</string>
+    <string name="custom_url_scheme">com.maoxie.writer</string>
+</resources>

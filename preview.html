@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>手机预览 · 码字工坊</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      background: #14100d;
+      color: #d9d0c1;
+      font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px 12px 40px;
+    }
+    h1 { font-size: 18px; margin-bottom: 4px; }
+    .sub { font-size: 12px; color: #8a8073; margin-bottom: 16px; }
+    .toolbar {
+      display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+      margin-bottom: 18px; align-items: center;
+    }
+    .toolbar button {
+      background: #262019; color: #d9d0c1; border: 1px solid #3d352a;
+      border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+      transition: all .15s;
+    }
+    .toolbar button:hover { border-color: #b97f2a; }
+    .toolbar button.active { background: #b97f2a; border-color: #b97f2a; color: #17120c; font-weight: 600; }
+    .sizeinfo { font-size: 12px; color: #8a8073; font-family: ui-monospace, monospace; }
+    /* 手机外壳 */
+    .frame {
+      background: #000; border-radius: 44px; padding: 12px;
+      box-shadow: 0 24px 80px rgba(0,0,0,.6), inset 0 0 0 2px #333;
+      transition: all .25s ease;
+    }
+    .notch {
+      position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+      width: 32%; height: 26px; background: #000; border-radius: 0 0 18px 18px; z-index: 10;
+    }
+    .screen {
+      position: relative; overflow: hidden; background: #171412;
+      border-radius: 32px; transition: all .25s ease;
+    }
+    iframe { border: 0; display: block; background: #171412; }
+    .hint { margin-top: 16px; font-size: 12px; color: #6b6257; line-height: 1.8; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>码字工坊 · 手机适配预览</h1>
+  <p class="sub">以 iQOO 15（6.82 英寸 20:9）为基准，可切换尺寸与横竖屏</p>
+
+  <div class="toolbar" id="presets"></div>
+  <div class="toolbar">
+    <button id="rotate">⇄ 旋转横竖屏</button>
+    <span class="sizeinfo" id="sizeinfo"></span>
+  </div>
+
+  <div class="frame" id="frame">
+    <div class="screen" id="screen">
+      <div class="notch" id="notch"></div>
+      <iframe id="app" src="./index.html" title="码字工坊"></iframe>
+    </div>
+  </div>
+
+  <p class="hint">
+    预览里的操作（写作、阅读、Part 组合、云同步等）与真实手机一致，数据存在这个预览页自己的存储里。<br/>
+    确认效果后回复我，我再打包成 Android APK 安装包。
+  </p>
+
+  <script>
+    // CSS 像素尺寸（与实际手机的 CSS viewport 一致）
+    var DEVICES = [
+      { name: '小屏安卓 · 360', w: 360, h: 800 },
+      { name: 'iQOO 15 · 400', w: 400, h: 890 },
+      { name: '大屏机 · 430', w: 430, h: 932 },
+    ]
+    var cur = 1
+    var rotated = false
+    var app = document.getElementById('app')
+    var screen_ = document.getElementById('screen')
+    var frame = document.getElementById('frame')
+    var notch = document.getElementById('notch')
+    var info = document.getElementById('sizeinfo')
+    var presets = document.getElementById('presets')
+
+    DEVICES.forEach(function (d, i) {
+      var b = document.createElement('button')
+      b.textContent = d.name
+      b.onclick = function () { cur = i; render() }
+      b.dataset.idx = i
+      presets.appendChild(b)
+    })
+
+    function render() {
+      var d = DEVICES[cur]
+      var w = rotated ? d.h : d.w
+      var h = rotated ? d.w : d.h
+      app.style.width = w + 'px'
+      app.style.height = h + 'px'
+      screen_.style.width = w + 'px'
+      screen_.style.height = h + 'px'
+      frame.style.width = w + 24 + 'px'
+      notch.style.display = rotated ? 'none' : 'block'
+      info.textContent = w + ' × ' + h + ' CSS px' + (rotated ? ' · 横屏' : ' · 竖屏')
+      Array.prototype.forEach.call(presets.children, function (b, i) {
+        b.className = i === cur ? 'active' : ''
+      })
+    }
+    document.getElementById('rotate').onclick = function () { rotated = !rotated; render() }
+    render()
+  </script>
+</body>
+</html>

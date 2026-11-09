@@ -1,0 +1,192 @@
+/* 这部分负责: 全局样式 —— 日/夜主题变量、编辑器排版、动画、阅读辅助高亮 */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.625rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* ===== 暖调日间（浅色）主题 ===== */
+:root {
+  --background: 36 33% 96%;
+  --foreground: 30 15% 18%;
+  --card: 36 30% 98%;
+  --card-foreground: 30 15% 18%;
+  --popover: 36 30% 99%;
+  --popover-foreground: 30 15% 18%;
+  --primary: 38 75% 42%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 34 20% 92%;
+  --secondary-foreground: 30 15% 25%;
+  --muted: 34 15% 93%;
+  --muted-foreground: 30 8% 45%;
+  --accent: 38 45% 90%;
+  --accent-foreground: 32 60% 32%;
+  --destructive: 0 70% 45%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 32 15% 85%;
+  --input: 32 15% 82%;
+  --ring: 38 75% 42%;
+  --scroll-thumb: 32 15% 78%;
+  --scroll-thumb-hover: 32 15% 70%;
+}
+
+/* ===== 码字工坊主题：暖调深色写作界面（放最后，保证与 :root 同优先级时深色胜出） ===== */
+.dark {
+  --background: 30 12% 8%;
+  --foreground: 36 20% 88%;
+  --card: 30 10% 10%;
+  --card-foreground: 36 20% 88%;
+  --popover: 30 12% 9%;
+  --popover-foreground: 36 20% 88%;
+  --primary: 38 70% 55%;
+  --primary-foreground: 30 30% 8%;
+  --secondary: 30 8% 16%;
+  --secondary-foreground: 36 20% 88%;
+  --muted: 30 8% 15%;
+  --muted-foreground: 36 8% 60%;
+  --accent: 38 40% 18%;
+  --accent-foreground: 38 70% 70%;
+  --destructive: 0 60% 45%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 32 8% 20%;
+  --input: 32 8% 22%;
+  --ring: 38 70% 55%;
+  --scroll-thumb: 32 8% 24%;
+  --scroll-thumb-hover: 32 8% 30%;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family:
+    'Segoe UI',
+    'PingFang SC',
+    'Microsoft YaHei',
+    system-ui,
+    sans-serif;
+}
+
+/* 文稿区：衬线字体 + 舒适行距 */
+.writer-editor {
+  font-family: 'Noto Serif CJK SC', 'Source Han Serif SC', 'Songti SC', 'SimSun', Georgia, serif;
+  caret-color: hsl(38 70% 55%);
+  background-image: none;
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--scroll-thumb));
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--scroll-thumb-hover));
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ===== 移动端适配（≤899px，含 iQOO 15 竖屏/横屏） ===== */
+@media (max-width: 899px) {
+  /* 防止 iOS/Android 聚焦输入框时页面自动放大（正文编辑区用内联字号不受影响） */
+  input[type='text'],
+  input:not([type]),
+  textarea:not([style*='font-size']) {
+    font-size: 16px;
+  }
+  /* 去掉点按时的灰色高亮块 */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* 细滚动条，省横向空间 */
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+}
+
+/* ===== 触屏设备（iPad 横屏走桌面布局，但没有 hover） ===== */
+/* 桌面布局里靠悬停才显示的操作按钮（章节/Part 的删除、展开等），在触屏上直接常显 */
+@media (hover: none) {
+  [class*='group-hover:opacity-100'] {
+    opacity: 1;
+  }
+}
