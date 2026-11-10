@@ -1,9 +1,145 @@
-// 这部分负责: 桌面端主进程 —— 窗口生命周期、GitHub API 代理（绕开 CORS）、导出写文件、外部链接
+// 这部分负责: 桌面端主进程 —— 窗口生命周期、GitHub API 代理（绕开 CORS）、导出写文件、外部链接、Claude 任务执行
 
 // 码字工坊 桌面端主进程
 const { app, BrowserWindow, Menu, ipcMain, net, shell, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs/promises')
+const { spawn } = require('child_process')
+
+// ─────────────── ฅ(ΦωΦ)ฅ ───────────────
+
+/** 把书文件夹内的相对路径解析成绝对路径，并防目录穿越（必须落在 bookDir 里） */
+function resolveInBook(bookDir, relPath) {
+  if (typeof bookDir !== 'string' || !bookDir || typeof relPath !== 'string' || !relPath) return null
+  const abs = path.resolve(bookDir, relPath)
+  const base = path.resolve(bookDir)
+  if (abs !== base && !abs.startsWith(base + path.sep)) return null
+  return abs
+}
+
+// ─────────────── (=`ω´=) ───────────────
+
+ipcMain.handle('maoxie-pick-file', async (event, filters, title) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  const res = await dialog.showOpenDialog(win, {
+    properties: ['openFile'],
+    title: typeof title === 'string' && title ? title : '选择文件',
+    filters: Array.isArray(filters) ? filters.map(([name, exts]) => ({ name, extensions: String(exts).split(',').map((s) => s.trim()).filter(Boolean) })) : undefined,
+  })
+  return res.canceled ? null : res.filePaths[0]
+})
+
+// ─────────────── ヾ(ΦωΦ) ───────────────
+
+ipcMain.handle('maoxie-read-any-file', async (_e, absPath) => {
+  if (typeof absPath !== 'string' || !absPath) return null
+  try {
+    return await fs.readFile(absPath, 'utf-8')
+  } catch {
+    return null
+  }
+})
+
+ipcMain.handle('maoxie-read-book-file', async (_e, bookDir, relPath) => {
+  const abs = resolveInBook(bookDir, relPath)
+  if (!abs) return null
+  try {
+    return await fs.readFile(abs, 'utf-8')
+  } catch {
+    return null
+  }
+})
+
+ipcMain.handle('maoxie-write-book-file', async (_e, bookDir, relPath, content) => {
+  const abs = resolveInBook(bookDir, relPath)
+  if (!abs || typeof content !== 'string') return false
+  try {
+    await fs.mkdir(path.dirname(abs), { recursive: true })
+    await fs.writeFile(abs, content, 'utf-8')
+    return true
+  } catch {
+    return false
+  }
+})
+
+ipcMain.handle('maoxie-list-book-dir', async (_e, bookDir, relPath) => {
+  const abs = resolveInBook(bookDir, relPath)
+  if (!abs) return []
+  try {
+    const ents = await fs.readdir(abs, { withFileTypes: true })
+    return ents.filter((x) => x.isFile()).map((x) => x.name)
+  } catch {
+    return []
+  }
+})
+
+// ─────────────── (=①ω①=) ───────────────
+
+/** 在跑的 Claude 任务表：taskId -> 子进程 */
+const aiProcs = new Map()
+
+ipcMain.handle('maoxie-ai-spawn', async (_e, taskId, bookDir, prompt, extraArgs) => {
+  if (aiProcs.has(taskId)) return { ok: false, error: '任务已在运行' }
+  const dirAbs = resolveInBook(bookDir, `运行\\ai\\${taskId}`)
+  if (!dirAbs) return { ok: false, error: '书文件夹无效' }
+  try {
+    await fs.mkdir(dirAbs, { recursive: true })
+    await fs.writeFile(path.join(dirAbs, '任务.txt'), prompt, 'utf-8')
+    const logFd = await fs.open(path.join(dirAbs, '日志.txt'), 'w')
+    // claude -p 无头模式：print 模式跑完自动退出；模型与全局规矩沿用本机 Claude Code 配置
+    const args = ['-p', prompt, '--output-format', 'text', ...(Array.isArray(extraArgs) ? extraArgs : [])]
+    const isWin = process.platform === 'win32'
+    const proc = spawn(isWin ? 'claude.cmd' : 'claude', args, {
+      cwd: path.resolve(bookDir),
+      shell: isWin,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    })
+    proc.stdout.on('data', (d) => logFd.write(d))
+    proc.stderr.on('data', (d) => logFd.write(d))
+    proc.on('close', () => {
+      aiProcs.delete(taskId)
+      logFd.close().catch(() => {})
+    })
+    proc.on('error', (err) => {
+      fs.writeFile(path.join(dirAbs, '失败.txt'), String(err), 'utf-8').catch(() => {})
+      aiProcs.delete(taskId)
+      logFd.close().catch(() => {})
+    })
+    aiProcs.set(taskId, proc)
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: String(err) }
+  }
+})
+
+ipcMain.handle('maoxie-ai-status', async (_e, taskId, bookDir) => {
+  const dirAbs = resolveInBook(bookDir, `运行\\ai\\${taskId}`)
+  if (!dirAbs) return { running: false, exitCode: null, done: false, fail: '书文件夹无效', logTail: '' }
+  const proc = aiProcs.get(taskId)
+  let done = false
+  let fail = null
+  let logTail = ''
+  try {
+    done = await fs.readFile(path.join(dirAbs, '完成.txt'), 'utf-8').then(() => true).catch(() => false)
+    if (!done) fail = await fs.readFile(path.join(dirAbs, '失败.txt'), 'utf-8').catch(() => null)
+    const log = await fs.readFile(path.join(dirAbs, '日志.txt'), 'utf-8').catch(() => '')
+    logTail = log.slice(-1200)
+  } catch {
+    /* 忽略 */
+  }
+  return { running: !!proc, exitCode: proc ? proc.exitCode : null, done, fail, logTail }
+})
+
+ipcMain.handle('maoxie-ai-kill', async (_e, taskId) => {
+  const proc = aiProcs.get(taskId)
+  if (!proc) return false
+  try {
+    proc.kill()
+    return true
+  } catch {
+    return false
+  }
+})
 
 // 渲染进程请求 GitHub REST API：走主进程 net.fetch，不受 CORS 限制
 // 同时只保留一个在途请求的手柄：渲染进程发出「中断」时立即 abort（手动保存接管自动上传）

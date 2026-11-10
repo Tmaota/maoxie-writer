@@ -3,7 +3,7 @@
 import { useMemo, useRef, useState } from 'react'
 import {
   Plus, ArrowUp, ArrowDown, Trash2, Pencil, Check, X, Library, ChevronLeft,
-  ChevronRight, ChevronDown, BookOpenText, Layers, Link2, Link2Off, BookCopy, Target,
+  ChevronRight, ChevronDown, BookOpenText, Layers, Link2, Link2Off, BookCopy, Target, FolderOpen,
 } from 'lucide-react'
 import type { Book, ChapterStatus, Combo, ViewMode } from '@/types'
 import { STATUS_META } from '@/types'
@@ -25,13 +25,15 @@ interface ShelfProps {
   onRenameBook: (id: string, name: string) => void
   onDeleteBook: (id: string) => void
   onSetBookGoal: (id: string, total: number | null, date: string | null) => void
+  /** 绑定/解绑小说根文件夹（AI 协作用，桌面端） */
+  onBindDir: (id: string, dir: string | null) => void
 }
 
 function bookChars(book: Book) {
   return book.chapters.reduce((s, c) => s + countChars(c.content), 0)
 }
 
-function Shelf({ books, onEnterBook, onAddBook, onRenameBook, onDeleteBook, onSetBookGoal }: ShelfProps) {
+function Shelf({ books, onEnterBook, onAddBook, onRenameBook, onDeleteBook, onSetBookGoal, onBindDir }: ShelfProps) {
   const [adding, setAdding] = useState(false)
   const [addName, setAddName] = useState('')
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -145,6 +147,18 @@ function Shelf({ books, onEnterBook, onAddBook, onRenameBook, onDeleteBook, onSe
                       title="完本目标"
                     >
                       <Target className="h-3 w-3" />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void pickBookDir(b, onBindDir)
+                      }}
+                      className={`rounded p-0.5 transition-opacity hover:text-foreground lg:opacity-0 lg:group-hover:opacity-100 ${
+                        b.dir ? 'text-amber-500' : 'text-muted-foreground'
+                      }`}
+                      title={b.dir ? `已绑定文件夹：${b.dir}` : '绑定小说文件夹（AI 协作）'}
+                    >
+                      <FolderOpen className="h-3 w-3" />
                     </button>
                     <button
                       onClick={(e) => {
@@ -708,9 +722,17 @@ export interface SidebarProps {
   onDeleteCombo: (id: string) => void
   onToggleComboChapter: (comboId: string, chapterId: string) => void
   onSetBookGoal: (id: string, total: number | null, date: string | null) => void
+  onBindDir: (id: string, dir: string | null) => void
 }
 
 // ─────────────── (ΦωΦ)ﾉ ───────────────
+
+/** 弹系统目录选择器绑定小说根文件夹；桌面端才有能力，网页/手机静默跳过 */
+async function pickBookDir(b: Book, onBindDir: (id: string, dir: string | null) => void) {
+  const { bridge } = await import('@/lib/bridge')
+  const dir = await bridge()?.pickDirectory(b.dir ?? undefined)
+  if (dir) onBindDir(b.id, dir)
+}
 
 export function Sidebar(props: SidebarProps) {
   const book = props.books.find((b) => b.id === props.activeBookId) ?? null
@@ -726,6 +748,7 @@ export function Sidebar(props: SidebarProps) {
           onRenameBook={props.onRenameBook}
           onDeleteBook={props.onDeleteBook}
           onSetBookGoal={props.onSetBookGoal}
+          onBindDir={props.onBindDir}
         />
       </div>
     )

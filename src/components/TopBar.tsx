@@ -1,7 +1,7 @@
 // 这部分负责: 桌面顶栏 —— 模式切换、章节/Part 信息、云端与设置入口
 
 import { useRef } from 'react'
-import { PenLine, Layers, BookOpenText, Menu, FileDown, FileText, FileArchive, Trash2, PanelRightClose, PanelRightOpen, History, Settings } from 'lucide-react'
+import { PenLine, Layers, BookOpenText, Menu, FileDown, FileText, FileArchive, Trash2, PanelRightClose, PanelRightOpen, History, Settings, Sparkles } from 'lucide-react'
 import type { ViewMode } from '@/types'
 import { Button } from '@/components/ui/button'
 import {
@@ -24,6 +24,10 @@ interface Props {
   onViewChange: (v: ViewMode) => void
   onToggleRight: () => void
   onToggleEdits: () => void
+  /** AI 协作浮窗开关（Claude 写稿/审查/拆书） */
+  aiOpen: boolean
+  aiCount: number
+  onToggleAi: () => void
   /** 批量导入 txt/docx/md 为章节（导入前弹命名窗） */
   onImportDocs: (files: File[]) => void
   onExportChapterTxt: () => void
@@ -81,6 +85,25 @@ export function TopBar(props: Props) {
       )}
 
       <span className="flex-1" />
+
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant={props.aiOpen ? 'secondary' : 'ghost'}
+            size="icon"
+            className="relative h-8 w-8"
+            onClick={props.onToggleAi}
+          >
+            <Sparkles className="h-4 w-4" />
+            {props.aiCount > 0 && (
+              <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[9px] font-bold text-black">
+                {props.aiCount}
+              </span>
+            )}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>AI 协作（Claude 写稿 / 审查 / 拆书）</TooltipContent>
+      </Tooltip>
 
       {props.cloudMenu}
 

@@ -18,4 +18,20 @@ contextBridge.exposeInMainWorld('maoxie', {
   pickDirectory: (defaultPath) => ipcRenderer.invoke('maoxie-pick-directory', defaultPath),
   /** 导出文件：已配目录直接写入，否则弹保存对话框；返回保存路径或 null（取消） */
   exportFile: (opts) => ipcRenderer.invoke('maoxie-export-file', opts),
+  /** 选文件，返回路径或 null */
+  pickFile: (filters, title) => ipcRenderer.invoke('maoxie-pick-file', filters, title),
+  /** 读任意路径文本文件 */
+  readAnyFile: (absPath) => ipcRenderer.invoke('maoxie-read-any-file', absPath),
+  /** 读书文件夹内文件（防目录穿越） */
+  readBookFile: (bookDir, relPath) => ipcRenderer.invoke('maoxie-read-book-file', bookDir, relPath),
+  /** 写书文件夹内文件（自动建目录） */
+  writeBookFile: (bookDir, relPath, content) => ipcRenderer.invoke('maoxie-write-book-file', bookDir, relPath, content),
+  /** 列书文件夹内一层文件名 */
+  listBookDir: (bookDir, relPath) => ipcRenderer.invoke('maoxie-list-book-dir', bookDir, relPath),
+  /** 起 Claude 无头任务 */
+  aiSpawn: (taskId, bookDir, prompt, extraArgs) => ipcRenderer.invoke('maoxie-ai-spawn', taskId, bookDir, prompt, extraArgs),
+  /** 轮询任务状态 */
+  aiStatus: (taskId, bookDir) => ipcRenderer.invoke('maoxie-ai-status', taskId, bookDir),
+  /** 中断任务 */
+  aiKill: (taskId) => ipcRenderer.invoke('maoxie-ai-kill', taskId),
 })

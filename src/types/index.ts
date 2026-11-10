@@ -49,6 +49,8 @@ export interface Book {
   goalTotal?: number | null
   /** 预计完本日期 YYYY-MM-DD（用于倒推每天该写多少，可空） */
   goalDate?: string | null
+  /** 绑定的小说根文件夹（桌面端 AI 协作用：Claude 在此读写，可空） */
+  dir?: string | null
 }
 
 // ─────────────── ฅ(ΦωΦ)ฅ ───────────────
