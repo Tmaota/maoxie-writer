@@ -1,10 +1,12 @@
-// 这部分负责: AI 协作对接协议 —— 和 Claude Code 无头模式之间的任务单/审稿报告/修稿交接
+// 这部分负责: AI 协作对接协议 —— 和 Claude 桌面版之间的任务派发/审稿报告/修稿交接（MCP 工具回交）
 
 /**
- * 对接思路：软件壳（界面/展示/定稿）+ Claude Code 无头模式（写稿/审查/修稿）。
- * 每本书绑定一个小说文件夹（含 正文\ 故事大纲\ 人物设定\ 账本\ 文风画像.md 等），
- * 任务运行时在该文件夹下建 运行\ai\<任务id>\ 交换目录，Claude 按固定文件名读写，
- * 软件轮询任务状态，完成后把审稿报告渲染成可勾选清单、修稿渲染成段落级 diff。
+ * 对接思路：界面壳（任务派发/报告勾选/段落 diff/定稿）+ Claude 桌面版（写稿/审查/修稿/拆书）。
+ * Claude 桌面版没有文件读写能力，所以：
+ * 1. 软件把写作上下文（文风画像/大纲/人设/账本/上一章）直接嵌进提示词，复制给桌面版；
+ * 2. 软件内置一个 MCP 桥（码字工坊 --mcp），注册进 Claude 桌面版后，
+ *    Claude 通过 maoxie_submit_* 工具把结果交回，软件轮询收件箱取件；
+ * 3. 没配 MCP 也能用：任务卡上有粘贴框，手动把结果粘回来，流程一样。
  */
 
 // ─────────────── ฅ(ΦωΦ)ฅ ───────────────
@@ -21,28 +23,27 @@ export interface AiTask {
   type: AiTaskType
   /** write/review：目标章节标题；decompose：来源文件名 */
   label: string
-  /** write 专用：章号（用于读上一章等） */
+  /** write 专用：章号 */
   chapterNo?: number
   /** review/revise 专用：章节 id（定稿回写用） */
   chapterId?: string
   phase: AiTaskPhase | 'decompose'
-  status: 'running' | 'done' | 'error' | 'cancelled'
+  /** waiting=提示词已就绪等 Claude 回交 done/error/cancelled */
+  status: 'waiting' | 'done' | 'error' | 'cancelled'
   startedAt: number
   finishedAt?: number
   error?: string
-  /** 完整提示词（手动模式复制用） */
+  /** 完整提示词（复制/重发用） */
   prompt?: string
-  /** review：原章内容；write：手动模式下用户粘贴的初稿（diff 原版） */
+  /** review：原章内容；write：回交的初稿（diff 原版） */
   origText?: string
-  /** 手动模式（Claude 命令行不可用，改在聊天里手动跑） */
-  manual?: boolean
-  /** 最近轮询到的日志尾巴（展示用） */
+  /** 最近收件箱动向（展示用） */
   logTail?: string
 }
 
 // ─────────────── (=`ω´=) ───────────────
 
-/** 审稿报告里的一条意见（Claude 写入 report.json，软件只读） */
+/** 审稿报告里的一条意见（Claude 回交 report.json 内容） */
 export interface ReviewItem {
   id: number
   rule: string
@@ -68,22 +69,18 @@ export interface ReviewReport {
 
 // ─────────────── ヾ(ΦωΦ) ───────────────
 
-/** 交换目录里的固定文件名 */
+/** 写进小说文件夹交换目录的文件名（留档/排障用；结果本体走 MCP 收件箱） */
 export const F = {
   prompt: '任务.txt',
-  log: '日志.txt',
   draft: '初稿.txt',
   report: '审稿报告.json',
   decision: '审稿决定.json',
   revised: '修订稿.txt',
   source: '送审稿.txt',
-  done: '完成.txt',
-  fail: '失败.txt',
   decomposeOut: '拆解.md',
-  decomposeSrc: '拆书原文.txt',
 }
 
-/** 任务在书文件夹下的相对交换目录（运行\ai\<id>\） */
+/** 任务在书文件夹下的相对目录（运行\ai\<id>\） */
 export function taskRelDir(id: string): string {
   return `运行\\ai\\${id}`
 }
@@ -128,88 +125,129 @@ export function saveAiReports(reports: ReviewReport[]) {
 
 // ─────────────── (=ΦωΦ=) ───────────────
 
-/** 写新章任务提示词：让 Claude 写稿 + 自审并落盘报告 */
-export function buildWritePrompt(task: AiTask, prevChapterTitle: string | null): string {
-  const t = taskRelDir(task.id)
-  return [
-    `你是小说协作写稿模式。工作目录就是这本小说的根目录（已 cd 进来）。`,
-    `任务：写《${task.bookName}》${task.label}。`,
-    ``,
-    `步骤（必须全部完成）：`,
-    `1. 先读 文风画像.md（没有就跳过）、故事大纲\\ 里的文件、人物设定\\ 里的文件、账本\\ 里的两本账（时间线和伏笔），${prevChapterTitle ? `再读 正文\\${prevChapterTitle}.txt（上一章）` : '这是第一章，不用读上一章'}。`,
-    `2. 动笔写${task.label}正文，只写正文，不要任何解释、提纲或创作说明。`,
-    `3. 写完后通读一遍，按你的 AI 味审查规矩自查（金句收尾、升华、缺主语毛边句等全部红线逐条过）。`,
-    `4. 把正文写入 ${t}\\${F.draft}（纯文本，UTF-8）。`,
-    `5. 把审查结果写入 ${t}\\${F.report}，严格用 JSON 格式：`,
-    `{"chapter":"${task.label}","items":[{"id":1,"rule":"规则名","para":段落序号,"original":"原文句子","problem":"问题描述","suggestion":"改法建议"}]}`,
-    `没有任何问题也要写 {"chapter":"${task.label}","items":[]}，这个文件必须存在。`,
-    `6. 最后往 ${t}\\${F.done} 写一个 DONE。`,
-    `注意：不要写 ${t}\\${F.decision}，那是下一步的事；不要碰 正文\\ 里的旧文件。`,
-  ].join('\n')
+/** 从书文件夹里捞出来的写作上下文（嵌进提示词用） */
+export interface BookContext {
+  /** 文风画像.md 全文（没有为 null） */
+  styleProfile: string | null
+  /** 故事大纲\ 全部文件合并 */
+  outline: string | null
+  /** 人物设定\ 全部文件合并 */
+  characters: string | null
+  /** 账本\ 全部文件合并 */
+  ledger: string | null
+  /** 正文\ 上一章全文 */
+  prevChapter: string | null
 }
 
-/** 审查已有章节：内容已由软件写入 送审稿.txt */
-export function buildReviewPrompt(task: AiTask): string {
-  const t = taskRelDir(task.id)
-  return [
-    `你是小说协作审稿模式。工作目录是小说根目录。`,
-    `任务：审查《${task.bookName}》的「${task.label}」。待审全文在 ${t}\\${F.source}。`,
-    ``,
-    `步骤：`,
-    `1. 读 ${t}\\${F.source} 全文，同时读 文风画像.md、人物设定\\、账本\\ 对照设定与文风。`,
-    `2. 按 AI 味审查规矩逐条过：金句收尾、升华、缺主语毛边句、比喻密度超标、对话腔不对，全部列出。`,
-    `3. 把审查结果写入 ${t}\\${F.report}，严格 JSON：`,
-    `{"chapter":"${task.label}","items":[{"id":1,"rule":"规则名","para":段落序号,"original":"原文句子","problem":"问题描述","suggestion":"改法建议"}]}`,
-    `没有问题的规则就跳过，没任何问题写 {"chapter":"${task.label}","items":[]}。`,
-    `4. 往 ${t}\\${F.done} 写一个 DONE。`,
-  ].join('\n')
+/** 单块上下文超过就截断，防把整个书塞进提示词 */
+function clip(s: string | null, n = 9000): string | null {
+  if (!s || !s.trim()) return null
+  return s.length > n ? s.slice(0, n) + '\n（……此处后略）' : s
 }
 
-/** 修稿任务：按用户勾选的决定改稿 */
-export function buildRevisePrompt(task: AiTask, fromDraft: boolean): string {
-  const t = taskRelDir(task.id)
-  const src = fromDraft ? `${t}\\${F.draft}` : `${t}\\${F.source}`
-  return [
-    `你是小说协作修稿模式。工作目录是小说根目录。`,
-    `任务：按决定修《${task.bookName}》的「${task.label}」。`,
-    ``,
-    `材料：`,
-    `- 原文：${src}`,
-    `- 要处理的意见：${t}\\${F.decision}（JSON，含 items 数组，每条有 id/original/problem/suggestion/adopt，adopt=true 的才改）`,
-    ``,
-    `步骤：`,
-    `1. 读原文和决定文件，只处理 adopt=true 的条目，其余一字不动。`,
-    `2. 改的时候保住原文的段落结构（段落数量可以变，但别整段重排），改法遵循 suggestion 的方向但要服从文风画像的规矩。`,
-    `3. 把修订后的完整正文写入 ${t}\\${F.revised}（纯文本，UTF-8）。`,
-    `4. 往 ${t}\\${F.done} 写一个 DONE。`,
-  ].join('\n')
+function block(title: string, content: string | null): string {
+  return content ? `\n【${title}】\n${content}\n` : ''
 }
 
-/** 拆书任务：拆结构、提文风、反推蓝图 */
-export function buildDecomposePrompt(task: AiTask, srcName: string): string {
-  const t = taskRelDir(task.id)
-  return [
-    `你是小说拆解模式。工作目录里 ${t}\\${F.decomposeSrc} 是一部作品的纯文本（原文件名：${srcName}）。`,
-    `任务：完整拆解这部作品，把结果写入 ${t}\\${F.decomposeOut}（Markdown，UTF-8）。`,
-    ``,
-    `报告必须严格用这几个二级标题分段：`,
-    `## 基本信息（书名、作者如可知、体裁、总字数估计）`,
-    `## 结构拆解（卷/部/章节划分，情节链按顺序列，每环一句话）`,
-    `## 文风画像（叙事视角、时态、句长节奏、断句习惯、对话占比、比喻风格、禁区的反面即它从不做什么——要具体到能照着仿写的程度）`,
-    `## 人物与关系（主要人物一句话画像 + 关系网）`,
-    `## 剧情蓝图（开端/发展/转折/高潮/结局各一段，可直接当写作蓝图用）`,
-    ``,
-    `全部写完后往 ${t}\\${F.done} 写一个 DONE。`,
-  ].join('\n')
-}
+/** 写作红线（桌面版读不到 Claude Code 的全局 CLAUDE.md，红线随提示词走） */
+const RED_LINES = [
+  '禁金句式收尾、升华式感慨、普世判断格言',
+  '禁缺主语的毛边句（灯亮着，走远的兽就找得着回来的路 ← 这种不行）',
+  '比喻要贴人物视角，不许作者跳出来感叹',
+  '对话要口语化，符合各人物设定，不许全员一个腔',
+  '写完逐条自查以上红线，踩了的写进审稿报告',
+].join('\n')
 
 // ─────────────── (=`ェ´=) ───────────────
+
+/** 写新章提示词：上下文全嵌进去，写完按顺序调两个工具交回 */
+export function buildWritePrompt(task: AiTask, ctx: BookContext): string {
+  return [
+    `【码字工坊任务：写新章】`,
+    `作品：《${task.bookName}》　本章：${task.label}`,
+    ``,
+    `写完后必须按顺序调用工具交回结果（缺一不可）：`,
+    `1. maoxie_submit_draft —— 完整正文（纯文本，只要正文，不要解释）`,
+    `2. maoxie_submit_report —— 自查审查报告 JSON：{"chapter":"${task.label}","items":[{"id":1,"rule":"规则名","para":段落序号,"original":"原文句子","problem":"问题描述","suggestion":"改法建议"}]}，一条问题没有也要交（items 为空数组）。`,
+    ``,
+    `【写作红线】`,
+    RED_LINES,
+    block('文风画像（必须遵守的成文规矩）', clip(ctx.styleProfile)),
+    block('故事大纲', clip(ctx.outline)),
+    block('人物设定', clip(ctx.characters)),
+    block('账本（时间线+伏笔，番外事实不进正篇账）', clip(ctx.ledger)),
+    block('上一章结尾（接这里的文气往下写）', clip(ctx.prevChapter, 6000)),
+    ``,
+    `现在动笔写${task.label}正文。`,
+  ].join('\n')
+}
+
+/** 审查已有章节：正文嵌进去，交报告 JSON */
+export function buildReviewPrompt(task: AiTask, ctx: BookContext): string {
+  return [
+    `【码字工坊任务：审查章节】`,
+    `作品：《${task.bookName}》　待审：${task.label}`,
+    ``,
+    `通读下面正文，对照【文风画像】【人物设定】【账本】逐条挑问题，全部写进审查报告，然后调用 maoxie_submit_report 交回。`,
+    `报告 JSON 格式：{"chapter":"${task.label}","items":[{"id":1,"rule":"规则名","para":段落序号,"original":"原文句子","problem":"问题描述","suggestion":"改法建议"}]}`,
+    `没有问题的规则跳过，一条没有就交空 items。`,
+    ``,
+    `【审查红线】`,
+    RED_LINES,
+    block('文风画像', clip(ctx.styleProfile)),
+    block('人物设定', clip(ctx.characters)),
+    block('账本', clip(ctx.ledger)),
+    block(`待审正文《${task.label}》`, task.origText ? clip(task.origText, 20000) : null),
+    ``,
+    `审完调 maoxie_submit_report 交报告，不要改原文。`,
+  ].join('\n')
+}
+
+/** 修稿任务：原版+用户勾选的决定嵌进去，交修订稿 */
+export function buildRevisePrompt(task: AiTask, adoptedItems: ReviewItem[], fromDraft: boolean): string {
+  const orig = task.origText ?? ''
+  const items = adoptedItems
+    .map((it) => `${it.id}. [${it.rule}] 原文：${it.original}\n   问题：${it.problem}\n   建议：${it.suggestion}`)
+    .join('\n')
+  return [
+    `【码字工坊任务：按决定修稿】`,
+    `作品：《${task.bookName}》　篇目：${task.label}`,
+    ``,
+    `下面是原版全文和「必须处理的意见清单」。只改清单里的问题，其余一字不动；段落结构尽量保持。改完调用 maoxie_submit_revised 交回完整修订稿（纯文本全文）。`,
+    ``,
+    `【必须处理的意见清单】`,
+    items || '（没有勾选项，原样交回即可）',
+    block(fromDraft ? '初稿全文' : '原文全文', clip(orig, 20000)),
+    ``,
+    `修完调 maoxie_submit_revised 交回。`,
+  ].join('\n')
+}
+
+/** 拆书任务：原文太长不嵌，让用户拖文件进对话 */
+export function buildDecomposePrompt(task: AiTask, srcName: string): string {
+  void task
+  return [
+    `【码字工坊任务：拆书】`,
+    `来源文件：${srcName}`,
+    ``,
+    `用户会把原文文件（${srcName}）拖进对话。收齐后拆解它，把报告调用 maoxie_submit_decompose 交回。`,
+    `报告用 Markdown，严格用这几个二级标题分段：`,
+    `## 基本信息（书名、作者如可知、体裁、总字数估计）`,
+    `## 结构拆解（卷/部/章节划分，情节链按顺序列，每环一句话）`,
+    `## 文风画像（叙事视角、时态、句长节奏、断句习惯、对话占比、比喻风格、它从不做什么——具体到能照着仿写）`,
+    `## 人物与关系（主要人物一句话画像 + 关系网）`,
+    `## 剧情蓝图（开端/发展/转折/高潮/结局各一段，可直接当写作蓝图）`,
+    ``,
+    `先回复「就绪」，等用户贴原文。贴完开拆，拆完调 maoxie_submit_decompose 交回报告。`,
+  ].join('\n')
+}
+
+// ─────────────── (=^･ω･^=) ───────────────
 
 /** 解析审稿报告 JSON：容错（去掉代码块围栏、截断修复、单条容错） */
 export function parseReport(raw: string): ReviewItem[] | null {
   let text = raw.trim()
   text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim()
-  // 有些模型会在 JSON 后面追加解释，截取到最后一个 }
   const end = text.lastIndexOf('}')
   if (end > 0) text = text.slice(0, end + 1)
   try {
@@ -233,7 +271,7 @@ export function parseReport(raw: string): ReviewItem[] | null {
   }
 }
 
-// ─────────────── (=^･ω･^=) ───────────────
+// ─────────────── (ΦωΦ)ﾉ ───────────────
 
 export interface DiffBlock {
   kind: 'same' | 'changed' | 'added' | 'removed'
@@ -253,7 +291,6 @@ export function diffParagraphs(oldText: string, newText: string): DiffBlock[] {
   const b = split(newText)
   const n = a.length
   const m = b.length
-  // LCS
   const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0))
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {

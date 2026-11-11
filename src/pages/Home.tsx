@@ -58,7 +58,7 @@ import { DecomposeDialog, type DecomposeRequest } from '@/components/DecomposeDi
 import {
   loadAiTasks, saveAiTasks, loadAiReports, saveAiReports, taskRelDir, F,
   buildWritePrompt, buildReviewPrompt, buildRevisePrompt, buildDecomposePrompt, parseReport,
-  type AiTask, type ReviewReport,
+  type AiTask, type ReviewReport, type BookContext,
 } from '@/lib/ai'
 import { CloudMenu } from '@/components/CloudMenu'
 import { SettingsDialog } from '@/components/SettingsDialog'
@@ -1358,7 +1358,7 @@ export default function Home() {
     }
   }, [])
 
-  /* ---------- AI 协作（Claude Code 无头对接，界面复刻书童的审稿/修稿交互） ---------- */
+  /* ---------- AI 协作（Claude 桌面版 + MCP 工具桥回交；界面复刻书童的审稿/修稿交互） ---------- */
 
   const desktop = useMemo(() => !!bridge(), [])
   const [aiOpen, setAiOpen] = useState(false)
@@ -1367,12 +1367,21 @@ export default function Home() {
   const [activeReport, setActiveReport] = useState<ReviewReport | null>(null)
   const [diffReq, setDiffReq] = useState<DiffRequest | null>(null)
   const [decomposeReq, setDecomposeReq] = useState<DecomposeRequest | null>(null)
+  const [claudeConfigured, setClaudeConfigured] = useState<boolean | null>(null)
   const aiTasksRef = useRef(aiTasks)
   aiTasksRef.current = aiTasks
-  const aiBusyRef = useRef<Set<string>>(new Set())
 
   useEffect(() => saveAiTasks(aiTasks), [aiTasks])
   useEffect(() => saveAiReports(aiReports), [aiReports])
+
+  /** 查 Claude 桌面版工具桥注册状态 */
+  useEffect(() => {
+    if (!desktop) return
+    void bridge()
+      ?.claudeStatus()
+      .then((s) => setClaudeConfigured(!!s?.configured))
+      .catch(() => setClaudeConfigured(null))
+  }, [desktop])
 
   const patchAiTask = useCallback((id: string, p: Partial<AiTask>) => {
     setAiTasks((ts) => ts.map((t) => (t.id === id ? { ...t, ...p } : t)))
@@ -1382,118 +1391,154 @@ export default function Home() {
     setAiReports((rs) => rs.map((r) => (r.taskId === taskId ? { ...r, state: 'resolved' as const } : r)))
   }, [])
 
-  /** 派一个 Claude 任务：写交换文件、起无头进程（或手动模式只登记） */
-  const spawnAi = useCallback(
-    async (base: Omit<AiTask, 'id' | 'bookId' | 'bookName' | 'bookDir' | 'status' | 'startedAt'>, prompt: string, manual: boolean) => {
+  /** 注册/推进「当前任务」（MCP 桥的 maoxie_get_task 按它指路） */
+  const advanceCurrentTask = useCallback(() => {
+    const br = bridge()
+    if (!br) return
+    const next = aiTasksRef.current.filter((t) => t.status === 'waiting').sort((a, b) => b.startedAt - a.startedAt)[0]
+    if (next) {
+      void br.aiSetCurrent({ taskId: next.id, label: next.label, phase: next.phase, type: next.type, bookName: next.bookName, prompt: next.prompt ?? '' })
+    } else {
+      void br.aiSetCurrent(null)
+    }
+  }, [])
+
+  /** 从书文件夹捞写作上下文（画像/大纲/人设/账本/上一章），嵌进提示词 */
+  const gatherContext = useCallback(async (bookDir: string, prevTitle: string | null): Promise<BookContext> => {
+    const br = bridge()
+    if (!br) return { styleProfile: null, outline: null, characters: null, ledger: null, prevChapter: null }
+    const readDir = async (rel: string) => {
+      const files = await br.listBookDir(bookDir, rel)
+      const parts: string[] = []
+      for (const f of files.slice(0, 20)) {
+        if (!/\.(md|txt)$/i.test(f)) continue
+        const c = await br.readBookFile(bookDir, `${rel}\\${f}`)
+        if (c && c.trim()) parts.push(`—— ${f} ——\n${c}`)
+      }
+      return parts.length ? parts.join('\n\n') : null
+    }
+    const [style, outline, characters, ledger] = await Promise.all([
+      br.readBookFile(bookDir, '文风画像.md'),
+      readDir('故事大纲'),
+      readDir('人物设定'),
+      readDir('账本'),
+    ])
+    const prevChapter = prevTitle ? await br.readBookFile(bookDir, `正文\\${prevTitle}.txt`) : null
+    return { styleProfile: style, outline, characters, ledger, prevChapter }
+  }, [])
+
+  const copyPrompt = useCallback(async (prompt: string) => {
+    try {
+      await navigator.clipboard.writeText(prompt)
+      toast.success('提示词已复制，去 Claude 桌面版粘贴（它写完会通过工具自动交回来）')
+    } catch {
+      toast.info('复制没成功，在任务卡上长按全选手动复制')
+    }
+  }, [])
+
+  /** 建任务公共收尾：写交换目录留档、登记当前任务、复制提示词 */
+  const launchTask = useCallback(
+    async (task: AiTask) => {
+      const br = bridge()
+      if (!br) return
+      await br.writeBookFile(task.bookDir, `${taskRelDir(task.id)}\\${F.prompt}`, task.prompt ?? '')
+      setAiTasks((ts) => [task, ...ts].slice(0, 30))
+      setAiOpen(true)
+      setTimeout(advanceCurrentTask, 0)
+      if (task.type === 'decompose') {
+        toast.success('拆书任务已建好：提示词已复制；原文在交换目录的 拆书原文.txt，拖进 Claude 对话即可')
+      }
+      void copyPrompt(task.prompt ?? '')
+    },
+    [advanceCurrentTask, copyPrompt]
+  )
+
+  /** 写新章：上下文嵌进提示词，Claude 写稿+自审后调工具交回 */
+  const startAiWrite = useCallback(
+    async (no: number, title: string) => {
       const bk = stateRef.current.books.find((b) => b.id === stateRef.current.activeBookId)
       const br = bridge()
       if (!br || !desktop) return toast.error('AI 协作只在电脑端可用')
       if (!bk?.dir) return toast.error('先去书架给这本书绑定小说文件夹（书封面上的文件夹图标）')
+      const label = title.trim() ? (/第\s*\d*\s*章/.test(title) ? title.trim() : `第${no}章 ${title.trim()}`) : `第${no}章`
+      const prev = bk.chapters.find((c) => new RegExp(`第0*${no - 1}章`).test(c.title)) ?? null
+      const ctx = await gatherContext(bk.dir, prev?.title ?? null)
       const id = uid()
       const task: AiTask = {
-        ...base,
         id,
         bookId: bk.id,
         bookName: bk.name,
         bookDir: bk.dir,
-        status: 'running',
-        startedAt: Date.now(),
-        prompt,
-        manual,
-      }
-      if (!manual) {
-        const r = await br.aiSpawn(id, bk.dir, prompt)
-        if (!r.ok) return toast.error(`任务没起成：${r.error ?? '未知原因'}`)
-      }
-      setAiTasks((ts) => [task, ...ts].slice(0, 30))
-      setAiOpen(true)
-      toast.success(manual ? '任务已建好（手动模式）：复制提示词发给 Claude，跑完把结果粘回来' : 'Claude 开工了，报告出来会在这里叫你')
-    },
-    [desktop]
-  )
-
-  /** 写新章：Claude 读画像/设定/账本就动笔，写完自审出报告 */
-  const startAiWrite = useCallback(
-    (no: number, title: string, manual: boolean) => {
-      const bk = stateRef.current.books.find((b) => b.id === stateRef.current.activeBookId)
-      if (!bk) return
-      const label = title.trim() ? (/第\s*\d*\s*章/.test(title) ? title.trim() : `第${no}章 ${title.trim()}`) : `第${no}章`
-      const prev = bk.chapters.find((c) => new RegExp(`第0*${no - 1}章`).test(c.title)) ?? null
-      const draft: Omit<AiTask, 'id' | 'bookId' | 'bookName' | 'bookDir' | 'status' | 'startedAt'> = {
         type: 'write',
         label,
         chapterNo: no,
         phase: 'write',
+        status: 'waiting',
+        startedAt: Date.now(),
       }
-      void spawnAi(draft, buildWritePrompt({ ...draft, id: '', bookId: '', bookName: bk.name, bookDir: '', status: 'running', startedAt: 0 }, prev?.title ?? null), manual)
+      task.prompt = buildWritePrompt(task, ctx)
+      await launchTask(task)
     },
-    [spawnAi]
+    [desktop, gatherContext, launchTask]
   )
 
-  /** 审查当前章节：正文送进交换目录，Claude 对照画像/设定/账本逐条挑刺 */
-  const startAiReview = useCallback(
-    (manual: boolean) => {
-      const bk = stateRef.current.books.find((b) => b.id === stateRef.current.activeBookId)
-      const ch = bk?.chapters.find((c) => c.id === stateRef.current.activeChapterId)
-      const br = bridge()
-      if (!bk || !ch || !br || !bk.dir) return
-      const draft: Omit<AiTask, 'id' | 'bookId' | 'bookName' | 'bookDir' | 'status' | 'startedAt'> = {
-        type: 'review',
-        label: ch.title,
-        chapterId: ch.id,
-        phase: 'review',
-        origText: ch.content,
-      }
-      const id = uid()
-      const dir = bk.dir
-      const t: AiTask = { ...draft, id, bookId: bk.id, bookName: bk.name, bookDir: dir, status: 'running', startedAt: Date.now(), manual }
-      void (async () => {
-        await br.writeBookFile(dir, `${taskRelDir(id)}\\${F.source}`, ch.content)
-        const prompt = buildReviewPrompt(t)
-        if (!manual) {
-          const r = await br.aiSpawn(id, dir, prompt)
-          if (!r.ok) return toast.error(`任务没起成：${r.error ?? '未知原因'}`)
-        }
-        setAiTasks((ts) => [t, ...ts].slice(0, 30))
-        setAiOpen(true)
-        toast.success(manual ? '任务已建好（手动模式）：复制提示词发给 Claude，跑完把结果粘回来' : '审查任务派出去了')
-      })()
-    },
-    []
-  )
+  /** 审查当前章节：正文嵌进提示词，交报告 JSON */
+  const startAiReview = useCallback(async () => {
+    const bk = stateRef.current.books.find((b) => b.id === stateRef.current.activeBookId)
+    const ch = bk?.chapters.find((c) => c.id === stateRef.current.activeChapterId)
+    const br = bridge()
+    if (!br || !desktop) return toast.error('AI 协作只在电脑端可用')
+    if (!bk || !ch) return toast.error('先到章节模式选中一章')
+    if (!bk.dir) return toast.error('先去书架给这本书绑定小说文件夹')
+    const ctx = await gatherContext(bk.dir, null)
+    const id = uid()
+    const task: AiTask = {
+      id,
+      bookId: bk.id,
+      bookName: bk.name,
+      bookDir: bk.dir,
+      type: 'review',
+      label: ch.title,
+      chapterId: ch.id,
+      phase: 'review',
+      status: 'waiting',
+      startedAt: Date.now(),
+      origText: ch.content,
+    }
+    await br.writeBookFile(bk.dir, `${taskRelDir(id)}\\${F.source}`, ch.content)
+    task.prompt = buildReviewPrompt(task, ctx)
+    await launchTask(task)
+  }, [desktop, gatherContext, launchTask])
 
-  /** 拆书：选 txt/md → Claude 拆结构、提文风、反推蓝图 */
-  const startAiDecompose = useCallback(
-    async (manual: boolean) => {
-      const bk = stateRef.current.books.find((b) => b.id === stateRef.current.activeBookId)
-      const br = bridge()
-      if (!br || !bk?.dir) return
-      const src = await br.pickFile([['文本文件', 'txt,md']], '选择要拆解的作品（txt/md）')
-      if (!src) return
-      const text = await br.readAnyFile(src)
-      if (text == null) return toast.error('这个文件读不出来')
-      const srcName = src.split(/[\\/]/).pop() ?? '未命名'
-      const id = uid()
-      const dir = bk.dir
-      const t: AiTask = {
-        id, bookId: bk.id, bookName: bk.name, bookDir: dir,
-        type: 'decompose', label: srcName, phase: 'decompose',
-        status: 'running', startedAt: Date.now(), manual,
-      }
-      await br.writeBookFile(dir, `${taskRelDir(id)}\\${F.decomposeSrc}`, text)
-      const prompt = buildDecomposePrompt(t, srcName)
-      if (!manual) {
-        const r = await br.aiSpawn(id, dir, prompt)
-        if (!r.ok) return toast.error(`任务没起成：${r.error ?? '未知原因'}`)
-      }
-      setAiTasks((ts) => [t, ...ts].slice(0, 30))
-      setAiOpen(true)
-      toast.success(manual ? '任务已建好（手动模式）：复制提示词发给 Claude，跑完把拆解报告粘回来' : '拆书任务派出去了')
-    },
-    []
-  )
+  /** 拆书：原文落交换目录，提示词让 Claude 等用户拖文件进对话 */
+  const startAiDecompose = useCallback(async () => {
+    const bk = stateRef.current.books.find((b) => b.id === stateRef.current.activeBookId)
+    const br = bridge()
+    if (!br || !desktop) return toast.error('AI 协作只在电脑端可用')
+    if (!bk?.dir) return toast.error('先去书架给这本书绑定小说文件夹')
+    const src = await br.pickFile([['文本文件', 'txt,md']], '选择要拆解的作品（txt/md）')
+    if (!src) return
+    const text = await br.readAnyFile(src)
+    if (text == null) return toast.error('这个文件读不出来')
+    const srcName = src.split(/[\\/]/).pop() ?? '未命名'
+    const id = uid()
+    const task: AiTask = {
+      id,
+      bookId: bk.id,
+      bookName: bk.name,
+      bookDir: bk.dir,
+      type: 'decompose',
+      label: srcName,
+      phase: 'decompose',
+      status: 'waiting',
+      startedAt: Date.now(),
+    }
+    await br.writeBookFile(bk.dir, `${taskRelDir(id)}\\拆书原文.txt`, text)
+    task.prompt = buildDecomposePrompt(task, srcName)
+    await launchTask(task)
+  }, [desktop, launchTask])
 
-  /** 定稿出口：写新章=新建章节；审查=覆盖原章。同时写回 正文\ 文件并留版本快照 */
+  /** 定稿出口：写新章=新建章节；审查=覆盖原章。写回 正文\ 文件并留版本快照 */
   const finalizeAiText = useCallback(
     (t: AiTask, text: string) => {
       const bk = stateRef.current.books.find((b) => b.id === t.bookId)
@@ -1530,44 +1575,26 @@ export default function Home() {
       void bridge()?.writeBookFile(t.bookDir, `正文\\${fileSafe}.txt`, text)
       resolveReport(t.id)
       setDiffReq(null)
-      toast.success(`「${t.label}」已定稿，已写入章节${t.type === 'write' ? '（新章）' : ''}并同步 正文\\ 文件`)
+      toast.success(`「${t.label}」已定稿，已写入章节并同步 正文\\ 文件`)
     },
     [patchChapter, resolveReport]
   )
 
-  /** 任务收尾：按阶段读产物（报告 JSON / 修订稿 / 拆解 md） */
-  const finishAiTask = useCallback(
-    async (taskId: string) => {
-      const t = aiTasksRef.current.find((x) => x.id === taskId)
-      const br = bridge()
-      if (!t || !br) return
-      const rel = (name: string) => `${taskRelDir(t.id)}\\${name}`
-      if (t.phase === 'decompose') {
-        const md = await br.readBookFile(t.bookDir, rel(F.decomposeOut))
-        if (md == null) {
-          patchAiTask(t.id, { status: 'error', finishedAt: Date.now(), error: '没找到拆解报告（拆解.md），Claude 可能没按协议写文件' })
-          return
-        }
-        patchAiTask(t.id, { status: 'done', finishedAt: Date.now() })
-        setDecomposeReq({
-          title: t.label,
-          markdown: md,
-          onExportStyle: (styleMd) =>
-            setExportNameReq({ defaultName: `文风画像-${t.label.replace(/\.(txt|md)$/i, '')}`, ext: 'md', apply: (name) => void runExport(makeTextPayload(`${name}.md`, styleMd), 'side', '文风画像已导出') }),
-          onExportAll: (full) =>
-            setExportNameReq({ defaultName: `拆解-${t.label.replace(/\.(txt|md)$/i, '')}`, ext: 'md', apply: (name) => void runExport(makeTextPayload(`${name}.md`, full), 'side', '拆解报告已导出') }),
-        })
+  /** 收件箱处理：按类型把回交物接到对应任务的下一步 */
+  const handleInboxLine = useCallback(
+    (line: { type: string; taskId: string; text: string }) => {
+      const t = aiTasksRef.current.find((x) => x.id === line.taskId)
+      if (!t || t.status !== 'waiting') return
+      if (line.type === 'draft') {
+        patchAiTask(t.id, { origText: line.text, logTail: '已收到初稿' })
+        void bridge()?.writeBookFile(t.bookDir, `${taskRelDir(t.id)}\\${F.draft}`, line.text)
+        toast.success(`「${t.label}」初稿已收回，等审查报告`)
         return
       }
-      if (t.phase === 'write' || t.phase === 'review') {
-        const raw = await br.readBookFile(t.bookDir, rel(F.report))
-        if (raw == null) {
-          patchAiTask(t.id, { status: 'error', finishedAt: Date.now(), error: '没找到审稿报告 JSON（report.json），看看任务日志' })
-          return
-        }
-        const items = parseReport(raw)
+      if (line.type === 'report') {
+        const items = parseReport(line.text)
         if (!items) {
-          patchAiTask(t.id, { status: 'error', finishedAt: Date.now(), error: '审稿报告 JSON 解析失败，原始内容在交换目录的 审稿报告.json 里' })
+          toast.error(`「${t.label}」回交的报告不是合法 JSON，让它重发或手动粘贴`)
           return
         }
         const rep: ReviewReport = {
@@ -1582,63 +1609,59 @@ export default function Home() {
           state: 'pending',
         }
         setAiReports((rs) => [rep, ...rs].slice(0, 60))
-        patchAiTask(t.id, { status: 'done', finishedAt: Date.now() })
+        patchAiTask(t.id, { status: 'done', finishedAt: Date.now(), logTail: '已收到报告' })
+        void bridge()?.writeBookFile(t.bookDir, `${taskRelDir(t.id)}\\${F.report}`, line.text)
         setAiOpen(true)
-        toast.info(`《${t.bookName}》${t.label} 的审稿报告出来了：${items.length} 条意见，等你勾选`)
+        setActiveReport(rep)
+        toast.info(`《${t.bookName}》${t.label} 审稿报告：${items.length} 条意见`)
+        setTimeout(advanceCurrentTask, 0)
         return
       }
-      // revise：读修订稿，弹逐段对比
-      const revised = await br.readBookFile(t.bookDir, rel(F.revised))
-      if (revised == null) {
-        patchAiTask(t.id, { status: 'error', finishedAt: Date.now(), error: '没找到修订稿（修订稿.txt）' })
+      if (line.type === 'revised') {
+        const orig = t.origText
+        if (orig == null) {
+          toast.error('还缺原版（初稿/原章），没法对比')
+          return
+        }
+        patchAiTask(t.id, { status: 'done', finishedAt: Date.now(), logTail: '已收到修订稿' })
+        void bridge()?.writeBookFile(t.bookDir, `${taskRelDir(t.id)}\\${F.revised}`, line.text)
+        setDiffReq({ title: t.label, original: orig, revised: line.text, onConfirm: (merged) => finalizeAiText(t, merged) })
+        setTimeout(advanceCurrentTask, 0)
         return
       }
-      const orig = t.type === 'write' ? await br.readBookFile(t.bookDir, rel(F.draft)) : (t.origText ?? null)
-      if (orig == null) {
-        patchAiTask(t.id, { status: 'error', finishedAt: Date.now(), error: '找不到原版（初稿/原章），没法对比' })
-        return
+      if (line.type === 'decompose') {
+        patchAiTask(t.id, { status: 'done', finishedAt: Date.now(), logTail: '已收到拆解报告' })
+        void bridge()?.writeBookFile(t.bookDir, `${taskRelDir(t.id)}\\${F.decomposeOut}`, line.text)
+        setDecomposeReq({
+          title: t.label,
+          markdown: line.text,
+          onExportStyle: (styleMd) =>
+            setExportNameReq({ defaultName: `文风画像-${t.label.replace(/\.(txt|md)$/i, '')}`, ext: 'md', apply: (name) => void runExport(makeTextPayload(`${name}.md`, styleMd), 'side', '文风画像已导出') }),
+          onExportAll: (full) =>
+            setExportNameReq({ defaultName: `拆解-${t.label.replace(/\.(txt|md)$/i, '')}`, ext: 'md', apply: (name) => void runExport(makeTextPayload(`${name}.md`, full), 'side', '拆解报告已导出') }),
+        })
+        setTimeout(advanceCurrentTask, 0)
       }
-      patchAiTask(t.id, { status: 'done', finishedAt: Date.now() })
-      setDiffReq({ title: t.label, original: orig, revised, onConfirm: (merged) => finalizeAiText(t, merged) })
     },
-    [finalizeAiText, patchAiTask]
+    [advanceCurrentTask, finalizeAiText, patchAiTask]
   )
 
-  /** 轮询在跑任务（2.5s 一次） */
+  /** 轮询收件箱（有待回交任务时每 2.5 秒取一次，取出来即清空） */
   useEffect(() => {
     if (!desktop) return
     const timer = window.setInterval(() => {
-      for (const t of aiTasksRef.current) {
-        if (t.status !== 'running' || t.manual || aiBusyRef.current.has(t.id)) continue
-        aiBusyRef.current.add(t.id)
-        const br = bridge()
-        if (!br) {
-          aiBusyRef.current.delete(t.id)
-          continue
-        }
-        br.aiStatus(t.id, t.bookDir)
-          .then(async (st) => {
-            if (st.logTail) patchAiTask(t.id, { logTail: st.logTail })
-            if (st.running) return
-            if (st.fail) {
-              patchAiTask(t.id, { status: 'error', finishedAt: Date.now(), error: st.fail.slice(0, 200) })
-              return
-            }
-            if (st.exitCode === null) return
-            if (!st.done) {
-              patchAiTask(t.id, { status: 'error', finishedAt: Date.now(), error: `Claude 提前退出了（码 ${st.exitCode}）。日志尾巴：${st.logTail.slice(-150)}` })
-              return
-            }
-            await finishAiTask(t.id)
-          })
-          .catch(() => {})
-          .finally(() => aiBusyRef.current.delete(t.id))
-      }
+      if (!aiTasksRef.current.some((t) => t.status === 'waiting')) return
+      void bridge()
+        ?.aiPollInbox()
+        .then((lines) => {
+          for (const l of lines) handleInboxLine(l)
+        })
+        .catch(() => {})
     }, 2500)
     return () => window.clearInterval(timer)
-  }, [desktop, patchAiTask, finishAiTask])
+  }, [desktop, handleInboxLine])
 
-  /** 报告勾选确认：写决定文件 → 派修稿（或直接用初稿） */
+  /** 报告勾选确认：直接用初稿定稿，或派修稿任务（勾选项嵌进提示词） */
   const confirmReport = useCallback(
     async (report: ReviewReport, adopt: Record<number, boolean>, mode: 'revise' | 'draft') => {
       const t = aiTasksRef.current.find((x) => x.id === report.taskId)
@@ -1646,9 +1669,9 @@ export default function Home() {
       setActiveReport(null)
       if (mode === 'draft' || !t) {
         if (t && t.type === 'write' && mode === 'draft') {
-          const draft = await br?.readBookFile(t.bookDir, `${taskRelDir(t.id)}\\${F.draft}`)
+          const draft = t.origText ?? (await br?.readBookFile(t.bookDir, `${taskRelDir(t.id)}\\${F.draft}`))
           if (draft == null) {
-            toast.error('没找到初稿（初稿.txt）')
+            toast.error('没找到初稿，先让 Claude 把初稿交回来')
             setActiveReport(report)
             return
           }
@@ -1658,25 +1681,38 @@ export default function Home() {
         }
         return
       }
+      const adopted = report.items.filter((it) => adopt[it.id] !== false)
       const decision = { items: report.items.map((it) => ({ ...it, adopt: adopt[it.id] !== false })) }
       const ok = await br?.writeBookFile(t.bookDir, `${taskRelDir(t.id)}\\${F.decision}`, JSON.stringify(decision, null, 2))
       if (!ok) return toast.error('决定文件写不进去，检查书文件夹是不是还在')
-      const prompt = buildRevisePrompt(t, t.type === 'write')
-      const r = await br!.aiSpawn(t.id, t.bookDir, prompt)
-      if (!r.ok) return toast.error(`修稿任务没起成：${r.error ?? '未知原因'}`)
-      patchAiTask(t.id, { phase: 'revise', status: 'running', startedAt: Date.now(), finishedAt: undefined, error: undefined, prompt })
+      const rt: AiTask = { ...t, phase: 'revise', status: 'waiting', startedAt: Date.now(), finishedAt: undefined, error: undefined, origText: t.origText }
+      rt.prompt = buildRevisePrompt(rt, adopted, t.type === 'write')
+      await launchTask(rt)
       setAiReports((rs) => rs.map((x) => (x.id === report.id ? { ...x, state: 'decided' as const } : x)))
-      toast.success('修稿任务派出去了，改完会弹逐段对比')
+      setAiTasks((ts) => ts.map((x) => (x.id === t.id ? rt : x)))
     },
-    [finalizeAiText, patchAiTask, resolveReport]
+    [finalizeAiText, launchTask, resolveReport]
   )
 
-  const killAiTask = useCallback((t: AiTask) => {
-    void bridge()?.aiKill(t.id)
-    patchAiTask(t.id, { status: 'cancelled', finishedAt: Date.now() })
-  }, [patchAiTask])
+  const cancelAiTask = useCallback(
+    (t: AiTask) => {
+      patchAiTask(t.id, { status: 'cancelled', finishedAt: Date.now() })
+      setTimeout(advanceCurrentTask, 0)
+    },
+    [advanceCurrentTask, patchAiTask]
+  )
 
-  /** 手动模式交接：粘报告 JSON（写章/审查）或拆解 md */
+  /** 把 MCP 桥注册进 Claude 桌面版 */
+  const setupClaude = useCallback(async () => {
+    const br = bridge()
+    if (!br) return
+    const r = await br.claudeSetup()
+    if (!r.ok) return toast.error(`注册失败：${r.error ?? '未知原因'}`)
+    setClaudeConfigured(true)
+    toast.success('已注册进 Claude 桌面版，重启一次 Claude 桌面版后生效')
+  }, [])
+
+  /** 粘贴兜底：报告 JSON / 拆解 md */
   const manualReport = useCallback(
     (t: AiTask, text: string) => {
       if (t.type === 'decompose') {
@@ -1689,6 +1725,7 @@ export default function Home() {
           onExportAll: (full) =>
             setExportNameReq({ defaultName: `拆解-${t.label.replace(/\.(txt|md)$/i, '')}`, ext: 'md', apply: (name) => void runExport(makeTextPayload(`${name}.md`, full), 'side', '拆解报告已导出') }),
         })
+        setTimeout(advanceCurrentTask, 0)
         return
       }
       const items = parseReport(text)
@@ -1707,29 +1744,31 @@ export default function Home() {
       setAiReports((rs) => [rep, ...rs].slice(0, 60))
       patchAiTask(t.id, { status: 'done', finishedAt: Date.now() })
       setActiveReport(rep)
+      setTimeout(advanceCurrentTask, 0)
     },
-    [patchAiTask]
+    [advanceCurrentTask, patchAiTask]
   )
 
-  /** 手动模式交接：粘初稿 */
+  /** 粘贴兜底：初稿 */
   const manualDraft = useCallback(
     (t: AiTask, text: string) => {
-      patchAiTask(t.id, { origText: text })
+      patchAiTask(t.id, { origText: text, logTail: '已粘贴初稿' })
       void bridge()?.writeBookFile(t.bookDir, `${taskRelDir(t.id)}\\${F.draft}`, text)
-      toast.success('初稿收好了，再把审稿报告 JSON 粘到下面提交')
+      toast.success('初稿收好了，再把审稿报告 JSON 粘进来')
     },
     [patchAiTask]
   )
 
-  /** 手动模式交接：粘修订稿 → 弹对比 */
+  /** 粘贴兜底：修订稿 → 弹对比 */
   const manualRevised = useCallback(
     (t: AiTask, text: string) => {
       const orig = t.origText
-      if (orig == null) return toast.error('还缺原版（初稿没粘过）')
+      if (orig == null) return toast.error('还缺原版（初稿没交过）')
       patchAiTask(t.id, { status: 'done', finishedAt: Date.now() })
       setDiffReq({ title: t.label, original: orig, revised: text, onConfirm: (merged) => finalizeAiText(t, merged) })
+      setTimeout(advanceCurrentTask, 0)
     },
-    [finalizeAiText, patchAiTask]
+    [advanceCurrentTask, finalizeAiText, patchAiTask]
   )
 
   /* ---------- 导出（顶栏「导入/导出」与手机「更多」菜单共用） ---------- */
@@ -2057,7 +2096,7 @@ export default function Home() {
               rightCollapsed={rightCollapsed}
               editsOpen={editsOpen}
               aiOpen={aiOpen}
-              aiCount={aiTasks.filter((t) => t.status === 'running').length + aiReports.filter((r) => r.state === 'pending').length}
+              aiCount={aiTasks.filter((t) => t.status === 'waiting').length + aiReports.filter((r) => r.state === 'pending').length}
               onToggleAi={() => setAiOpen((o) => !o)}
               cloudMenu={cloudMenuEl}
               onViewChange={handleViewChange}
@@ -2170,7 +2209,7 @@ export default function Home() {
           />
         )}
 
-        {/* AI 协作：任务浮窗（仅桌面端；手机/网页没有本地 Claude 可调度） */}
+        {/* AI 协作：任务浮窗（仅桌面端；Claude 桌面版 + MCP 工具桥回交） */}
         {desktop && (
           <AiDock
             open={aiOpen}
@@ -2179,13 +2218,15 @@ export default function Home() {
             activeChapter={activeChapter}
             view={state.view}
             desktop={desktop}
+            claudeConfigured={claudeConfigured}
+            onSetupClaude={() => void setupClaude()}
             tasks={aiTasks}
             reports={aiReports}
-            onStartWrite={(no, title, manual) => startAiWrite(no, title, manual)}
-            onStartReview={(manual) => startAiReview(manual)}
-            onStartDecompose={(manual) => void startAiDecompose(manual)}
+            onStartWrite={(no, title) => void startAiWrite(no, title)}
+            onStartReview={() => void startAiReview()}
+            onStartDecompose={() => void startAiDecompose()}
             onOpenReport={setActiveReport}
-            onKillTask={killAiTask}
+            onCancelTask={cancelAiTask}
             onDeleteTask={(t) => setAiTasks((ts) => ts.filter((x) => x.id !== t.id))}
             onDeleteReport={(id) => setAiReports((rs) => rs.filter((r) => r.id !== id))}
             onManualReport={manualReport}

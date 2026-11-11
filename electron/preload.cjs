@@ -28,10 +28,12 @@ contextBridge.exposeInMainWorld('maoxie', {
   writeBookFile: (bookDir, relPath, content) => ipcRenderer.invoke('maoxie-write-book-file', bookDir, relPath, content),
   /** 列书文件夹内一层文件名 */
   listBookDir: (bookDir, relPath) => ipcRenderer.invoke('maoxie-list-book-dir', bookDir, relPath),
-  /** 起 Claude 无头任务 */
-  aiSpawn: (taskId, bookDir, prompt, extraArgs) => ipcRenderer.invoke('maoxie-ai-spawn', taskId, bookDir, prompt, extraArgs),
-  /** 轮询任务状态 */
-  aiStatus: (taskId, bookDir) => ipcRenderer.invoke('maoxie-ai-status', taskId, bookDir),
-  /** 中断任务 */
-  aiKill: (taskId) => ipcRenderer.invoke('maoxie-ai-kill', taskId),
+  /** 登记/清除「当前任务」（Claude 桌面版用 maoxie_get_task 取） */
+  aiSetCurrent: (payload) => ipcRenderer.invoke('maoxie-ai-set-current', payload),
+  /** 取走收件箱全部回交（读出来就清空） */
+  aiPollInbox: () => ipcRenderer.invoke('maoxie-ai-poll-inbox'),
+  /** Claude 桌面版 MCP 注册状态 */
+  claudeStatus: () => ipcRenderer.invoke('maoxie-claude-status'),
+  /** 把 MCP 桥注册进 Claude 桌面版配置 */
+  claudeSetup: () => ipcRenderer.invoke('maoxie-claude-setup'),
 })

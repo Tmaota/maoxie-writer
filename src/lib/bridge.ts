@@ -31,14 +31,16 @@ export interface MaoxieBridge {
   readBookFile: (bookDir: string, relPath: string) => Promise<string | null>
   /** 往书文件夹内相对路径写文本（自动建目录） */
   writeBookFile: (bookDir: string, relPath: string, content: string) => Promise<boolean>
-  /** 起 Claude 无头任务：prompt 写入交换目录后 spawn claude -p */
-  aiSpawn: (taskId: string, bookDir: string, prompt: string, extraArgs?: string[]) => Promise<{ ok: boolean; error?: string }>
-  /** 轮询任务：running / exitCode / done / fail 内容 / 日志尾巴 */
-  aiStatus: (taskId: string, bookDir: string) => Promise<{ running: boolean; exitCode: number | null; done: boolean; fail: string | null; logTail: string }>
-  /** 中断任务进程 */
-  aiKill: (taskId: string) => Promise<boolean>
   /** 列书文件夹内相对目录（一层），返回文件名 */
   listBookDir: (bookDir: string, relPath: string) => Promise<string[]>
+  /** 登记/清除「当前任务」（MCP 桥的 maoxie_get_task 读它） */
+  aiSetCurrent: (payload: unknown) => Promise<boolean>
+  /** 取走收件箱全部回交（读出来即清空），返回 {type,taskId,text,at}[] */
+  aiPollInbox: () => Promise<{ type: string; taskId: string; text: string; at: number }[]>
+  /** Claude 桌面版 MCP 注册状态 */
+  claudeStatus: () => Promise<{ configured: boolean; command: string | null }>
+  /** 一键把 MCP 桥注册进 Claude 桌面版 */
+  claudeSetup: () => Promise<{ ok: boolean; error?: string }>
 }
 
 // ─────────────── (=ↀωↀ=) ───────────────

@@ -4,7 +4,7 @@
 const { app, BrowserWindow, Menu, ipcMain, net, shell, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs/promises')
-const { spawn } = require('child_process')
+const os = require('os')
 
 // ─────────────── ฅ(ΦωΦ)ฅ ───────────────
 
@@ -74,70 +74,82 @@ ipcMain.handle('maoxie-list-book-dir', async (_e, bookDir, relPath) => {
 })
 
 // ─────────────── (=①ω①=) ───────────────
+// AI 协作收件箱：MCP 桥（Claude 桌面版）把结果写进 ai-inbox.jsonl，渲染进程轮询取走后清空
 
-/** 在跑的 Claude 任务表：taskId -> 子进程 */
-const aiProcs = new Map()
+const aiUserData = path.join(app.getPath('userData'))
+const aiInboxFile = path.join(aiUserData, 'ai-inbox.jsonl')
+const aiCurrentTaskFile = path.join(aiUserData, 'ai-current-task.json')
 
-ipcMain.handle('maoxie-ai-spawn', async (_e, taskId, bookDir, prompt, extraArgs) => {
-  if (aiProcs.has(taskId)) return { ok: false, error: '任务已在运行' }
-  const dirAbs = resolveInBook(bookDir, `运行\\ai\\${taskId}`)
-  if (!dirAbs) return { ok: false, error: '书文件夹无效' }
+/** 渲染进程登记/清除「当前任务」（MCP 桥的 maoxie_get_task 读这个文件） */
+ipcMain.handle('maoxie-ai-set-current', async (_e, payload) => {
   try {
-    await fs.mkdir(dirAbs, { recursive: true })
-    await fs.writeFile(path.join(dirAbs, '任务.txt'), prompt, 'utf-8')
-    const logFd = await fs.open(path.join(dirAbs, '日志.txt'), 'w')
-    // claude -p 无头模式：print 模式跑完自动退出；模型与全局规矩沿用本机 Claude Code 配置
-    const args = ['-p', prompt, '--output-format', 'text', ...(Array.isArray(extraArgs) ? extraArgs : [])]
-    const isWin = process.platform === 'win32'
-    const proc = spawn(isWin ? 'claude.cmd' : 'claude', args, {
-      cwd: path.resolve(bookDir),
-      shell: isWin,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-    })
-    proc.stdout.on('data', (d) => logFd.write(d))
-    proc.stderr.on('data', (d) => logFd.write(d))
-    proc.on('close', () => {
-      aiProcs.delete(taskId)
-      logFd.close().catch(() => {})
-    })
-    proc.on('error', (err) => {
-      fs.writeFile(path.join(dirAbs, '失败.txt'), String(err), 'utf-8').catch(() => {})
-      aiProcs.delete(taskId)
-      logFd.close().catch(() => {})
-    })
-    aiProcs.set(taskId, proc)
-    return { ok: true }
-  } catch (err) {
-    return { ok: false, error: String(err) }
-  }
-})
-
-ipcMain.handle('maoxie-ai-status', async (_e, taskId, bookDir) => {
-  const dirAbs = resolveInBook(bookDir, `运行\\ai\\${taskId}`)
-  if (!dirAbs) return { running: false, exitCode: null, done: false, fail: '书文件夹无效', logTail: '' }
-  const proc = aiProcs.get(taskId)
-  let done = false
-  let fail = null
-  let logTail = ''
-  try {
-    done = await fs.readFile(path.join(dirAbs, '完成.txt'), 'utf-8').then(() => true).catch(() => false)
-    if (!done) fail = await fs.readFile(path.join(dirAbs, '失败.txt'), 'utf-8').catch(() => null)
-    const log = await fs.readFile(path.join(dirAbs, '日志.txt'), 'utf-8').catch(() => '')
-    logTail = log.slice(-1200)
-  } catch {
-    /* 忽略 */
-  }
-  return { running: !!proc, exitCode: proc ? proc.exitCode : null, done, fail, logTail }
-})
-
-ipcMain.handle('maoxie-ai-kill', async (_e, taskId) => {
-  const proc = aiProcs.get(taskId)
-  if (!proc) return false
-  try {
-    proc.kill()
+    if (payload && typeof payload === 'object') {
+      await fs.writeFile(aiCurrentTaskFile, JSON.stringify(payload), 'utf-8')
+    } else {
+      await fs.rm(aiCurrentTaskFile, { force: true })
+    }
     return true
   } catch {
     return false
+  }
+})
+
+/** 取走收件箱全部内容（读出来就清空，防重复处理） */
+ipcMain.handle('maoxie-ai-poll-inbox', async () => {
+  try {
+    const raw = await fs.readFile(aiInboxFile, 'utf-8')
+    await fs.rm(aiInboxFile, { force: true })
+    return raw
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((l) => {
+        try {
+          return JSON.parse(l)
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+})
+
+/** Claude 桌面版 MCP 配置状态 + 一键注册 */
+const CLAUDE_CONFIG = path.join(os.homedir(), 'AppData', 'Roaming', 'Claude', 'claude_desktop_config.json')
+
+function readClaudeConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(CLAUDE_CONFIG, 'utf-8'))
+  } catch {
+    return {}
+  }
+}
+
+ipcMain.handle('maoxie-claude-status', async () => {
+  try {
+    const cfg = readClaudeConfig()
+    const servers = cfg.mcpServers || {}
+    const entry = servers.maoxie
+    return { configured: !!(entry && entry.command), command: entry?.command ?? null }
+  } catch {
+    return { configured: false, command: null }
+  }
+})
+
+ipcMain.handle('maoxie-claude-setup', async () => {
+  try {
+    const cfg = readClaudeConfig()
+    cfg.mcpServers = cfg.mcpServers || {}
+    // MCP 桥用 electron 的「以 node 运行」模式拉起打包里的 mcp-server.cjs（stdio 管道行为等同 node，稳定）
+    const scriptPath = path.join(path.dirname(process.execPath), 'resources', 'app.asar', 'electron', 'mcp-server.cjs')
+    cfg.mcpServers.maoxie = { command: process.execPath, args: [scriptPath], env: { ELECTRON_RUN_AS_NODE: '1' } }
+    await fs.mkdir(path.dirname(CLAUDE_CONFIG), { recursive: true })
+    await fs.writeFile(CLAUDE_CONFIG, JSON.stringify(cfg, null, 2), 'utf-8')
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: String(err) }
   }
 })
 
@@ -255,6 +267,7 @@ function createWindow() {
   win.loadFile(path.join(__dirname, '../dist/index.html'))
 }
 
+// MCP 桥走「electron 以 node 模式跑 mcp-server.cjs」，不进这里；正常模式起窗口
 app.whenReady().then(() => {
   createWindow()
   app.on('activate', () => {
